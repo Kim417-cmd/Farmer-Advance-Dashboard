@@ -1,125 +1,152 @@
 import { SHEET_ID, MONTHS } from "./config.js";
 
-// ─── Normalize clerk names ────────────────────────────────────────────────────
+// ─── Clerk name normalizer ────────────────────────────────────────────────────
 const CLERK_MAP = {
-  "nuru juma": "Nuru Juma", "nuru": "Nuru Juma",
-  "bilal kizere": "Bilali Kizere", "bilal": "Bilali Kizere", "bilali kizere": "Bilali Kizere",
-  "vallary mbone": "Vallary Mbone",
-  "geofrey mhandi": "Geofry Mwandi", "geofrey": "Geofry Mwandi",
-  "harrison": "Harrison Mwero", "hassan mwero": "Harrison Mwero",
-  "feli adero": "Felix Adero", "adero felix": "Felix Adero",
-  "emmanuel": "Emmanuel Mwendwa", "ezekiel": "Ezekiel Malondo",
-  "livingston masha": "Livingstone Masha", "livingston": "Livingstone Masha",
-  "hassan nzaria": "Hassan Nzaria",
-  "said mwadzarino": "Saidi Mwadzarino", "mwadzarino": "Saidi Mwadzarino", "mwazdarino": "Saidi Mwadzarino",
-  "abdallah kipanga": "Abdalla Kipanga", "stephen": "Stephen Muthui",
-  "abdalla mwajadi": "Mwajadi", "mwajadi": "Mwajadi", "hemedi": "Hemedi Sheria",
-  "regan mumo": "Regun Mumo", "jackson mumo": "Regun Mumo",
-  "victor musyoki": "Victor Musyoka", "hassan omar": "Omar Hassan", "odero": "Odero Felix",
+  "nuru juma":"Nuru Juma","nuru":"Nuru Juma",
+  "bilal kizere":"Bilali Kizere","bilal":"Bilali Kizere","bilali kizere":"Bilali Kizere",
+  "vallary mbone":"Vallary Mbone","geofrey mhandi":"Geofry Mwandi","geofrey":"Geofry Mwandi",
+  "harrison":"Harrison Mwero","hassan mwero":"Harrison Mwero",
+  "feli adero":"Felix Adero","adero felix":"Felix Adero",
+  "emmanuel":"Emmanuel Mwendwa","ezekiel":"Ezekiel Malondo",
+  "livingston masha":"Livingstone Masha","livingston":"Livingstone Masha",
+  "hassan nzaria":"Hassan Nzaria",
+  "said mwadzarino":"Saidi Mwadzarino","mwadzarino":"Saidi Mwadzarino","mwazdarino":"Saidi Mwadzarino",
+  "abdallah kipanga":"Abdalla Kipanga","stephen":"Stephen Muthui",
+  "abdalla mwajadi":"Mwajadi","mwajadi":"Mwajadi","hemedi":"Hemedi Sheria",
+  "regan mumo":"Regun Mumo","jackson mumo":"Regun Mumo",
+  "victor musyoki":"Victor Musyoka","hassan omar":"Omar Hassan","odero":"Odero Felix",
 };
 
 function normalizeClerk(raw) {
   if (!raw) return "Unknown";
-  const trimmed = raw.trim();
-  if (trimmed.includes("@")) {
-    const local = trimmed.split("@")[0];
-    return local.replace(/[^a-zA-Z\s]/g, " ").split(/\s+/)
-      .map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ").trim() || "Unknown";
+  const t = raw.trim();
+  if (t.includes("@")) {
+    return t.split("@")[0].replace(/[^a-zA-Z\s]/g," ")
+      .split(/\s+/).map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(" ").trim() || "Unknown";
   }
-  return CLERK_MAP[trimmed.toLowerCase()] || trimmed;
+  return CLERK_MAP[t.toLowerCase()] || t;
 }
 
-// ─── Fetch via Vercel proxy (production) or direct (localhost) ────────────────
-export async function fetchTab(tabName) {
-  const isDev = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+// ─── Parse CSV text into 2D array ─────────────────────────────────────────────
+function parseCSV(text) {
+  const rows = [];
+  const lines = text.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const cells = [];
+    let cur = "", inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === "," && !inQ) { cells.push(cur.trim()); cur = ""; }
+      else { cur += ch; }
+    }
+    cells.push(cur.trim());
+    rows.push(cells);
+  }
+  return rows;
+}
+
+// ─── Fetch one tab via Vercel proxy → Google CSV export ───────────────────────
+export async function fetchTab(tab) {
+  const isDev = window.location.hostname === "localhost" ||
+                window.location.hostname === "127.0.0.1";
+
+  // Use gid (numeric tab id) for reliability
   const url = isDev
-    ? `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(tabName)}`
-    : `/api/sheet?sheetId=${SHEET_ID}&sheet=${encodeURIComponent(tabName)}`;
+    ? `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${tab.gid}`
+    : `/api/sheet?sheetId=${SHEET_ID}&gid=${tab.gid}`;
 
   const res = await fetch(url);
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Failed to load tab "${tabName}" (HTTP ${res.status}). Make sure the Google Sheet is shared as "Anyone with the link can view". ${body}`);
+    let detail = "";
+    try { detail = await res.text(); } catch(_) {}
+    throw new Error(
+      `Tab "${tab.name}" failed (HTTP ${res.status}). ` +
+      `Ensure sheet is shared as "Anyone with the link → Viewer". ` +
+      (detail ? `Server said: ${detail.slice(0,200)}` : "")
+    );
   }
 
-  const text = await res.text();
-  const jsonStr = text.replace(/^[^\{]*/, "").replace(/\);\s*$/, "");
-  let gviz;
-  try { gviz = JSON.parse(jsonStr); }
-  catch (e) { throw new Error(`Could not parse response for tab "${tabName}". Raw: ${text.slice(0, 200)}`); }
+  const csv = await res.text();
+  if (!csv || csv.toLowerCase().includes("<!doctype")) {
+    throw new Error(`Tab "${tab.name}" returned an HTML page instead of CSV. The sheet may not be public.`);
+  }
 
-  if (!gviz?.table?.rows) return [];
-  return gviz.table.rows.map(row => row.c.map(cell => (cell ? cell.v : null)));
+  return parseCSV(csv);
 }
 
+// ─── Number helper ────────────────────────────────────────────────────────────
 function num(v) {
-  if (v === null || v === undefined || v === "") return 0;
-  if (typeof v === "number") return v;
-  const n = parseFloat(String(v).replace(/,/g, ""));
+  if (!v || v === "") return 0;
+  const n = parseFloat(String(v).replace(/,/g,"").replace(/[^0-9.\-]/g,""));
   return isNaN(n) ? 0 : n;
 }
 
-function parseRows(rawRows, layout, year) {
-  if (!rawRows.length) return [];
-  return rawRows.slice(1).map(row => {
-    let name, clerk, dateOfIssue, monthlyStart;
-    if (layout === "standard2026")   { name=row[1]; clerk=row[2]; dateOfIssue=row[4]; monthlyStart=5; }
-    else if (layout === "withDistrict")  { name=row[0]; clerk=row[2]; dateOfIssue=row[4]; monthlyStart=5; }
-    else if (layout === "withOpeningBal"){ name=row[1]; clerk=row[3]; dateOfIssue=row[7]; monthlyStart=8; }
-    else { name=row[0]; clerk=row[1]; dateOfIssue=row[3]; monthlyStart=4; }
+// ─── Parse 2D CSV array into farmer records ───────────────────────────────────
+function parseRows(rows2d, layout, year) {
+  if (rows2d.length < 2) return [];
+  return rows2d.slice(1).map(row => {
+    let name, clerk, dateOfIssue, ms;
+    if      (layout === "standard2026")   { name=row[1]; clerk=row[2]; dateOfIssue=row[4]; ms=5; }
+    else if (layout === "withDistrict")   { name=row[0]; clerk=row[2]; dateOfIssue=row[4]; ms=5; }
+    else if (layout === "withOpeningBal") { name=row[1]; clerk=row[3]; dateOfIssue=row[7]; ms=8; }
+    else                                  { name=row[0]; clerk=row[1]; dateOfIssue=row[3]; ms=4; }
 
-    if (!name || typeof name !== "string" || !name.trim()) return null;
+    if (!name || !name.trim() || name.trim().toLowerCase() === "name") return null;
 
     const months = MONTHS.map((month, i) => ({
       month, monthIndex: i,
-      additions: num(row[monthlyStart + i * 3]),
-      recovery:  num(row[monthlyStart + i * 3 + 1]),
+      additions: num(row[ms + i*3]),
+      recovery:  num(row[ms + i*3 + 1]),
     }));
 
-    const totalIssued    = months.reduce((s, m) => s + m.additions, 0);
-    const totalRecovered = months.reduce((s, m) => s + m.recovery,  0);
+    const totalIssued    = months.reduce((s,m) => s + m.additions, 0);
+    const totalRecovered = months.reduce((s,m) => s + m.recovery,  0);
+    if (totalIssued === 0) return null;
 
-    let dateStr = "";
-    if (dateOfIssue) {
-      if (typeof dateOfIssue === "string" && dateOfIssue.startsWith("Date(")) {
-        const parts = dateOfIssue.replace("Date(","").replace(")","").split(",");
-        dateStr = new Date(+parts[0], +parts[1], +parts[2]).toLocaleDateString("en-KE");
-      } else { dateStr = String(dateOfIssue); }
-    }
-
-    return { name: name.trim(), clerk: normalizeClerk(clerk), dateOfIssue: dateStr, year, months, totalIssued, totalRecovered, pending: totalIssued - totalRecovered };
-  }).filter(r => r !== null && r.totalIssued > 0);
+    return {
+      name: name.trim(),
+      clerk: normalizeClerk(clerk),
+      dateOfIssue: dateOfIssue || "",
+      year, months, totalIssued, totalRecovered,
+      pending: totalIssued - totalRecovered,
+    };
+  }).filter(Boolean);
 }
 
+// ─── Aggregate into summary ───────────────────────────────────────────────────
 export function buildSummary(rows) {
-  const monthlyMap = {}, clerkMap = {}, farmerCount = {};
-  MONTHS.forEach((m, i) => { monthlyMap[m] = { month: m, monthIndex: i, issued: 0, recovered: 0, count: 0 }; });
+  const mMap={}, cMap={}, fMap={};
+  MONTHS.forEach((m,i) => { mMap[m]={month:m,monthIndex:i,issued:0,recovered:0,count:0}; });
+
   rows.forEach(r => {
-    farmerCount[r.name] = (farmerCount[r.name] || 0) + 1;
+    fMap[r.name] = (fMap[r.name]||0) + 1;
     r.months.forEach(m => {
-      monthlyMap[m.month].issued    += m.additions;
-      monthlyMap[m.month].recovered += m.recovery;
-      if (m.additions > 0) monthlyMap[m.month].count += 1;
+      mMap[m.month].issued    += m.additions;
+      mMap[m.month].recovered += m.recovery;
+      if (m.additions>0) mMap[m.month].count++;
     });
-    const ck = r.clerk;
-    if (!clerkMap[ck]) clerkMap[ck] = { clerk: ck, issued: 0, recovered: 0, count: 0 };
-    clerkMap[ck].issued    += r.totalIssued;
-    clerkMap[ck].recovered += r.totalRecovered;
-    if (r.totalIssued > 0) clerkMap[ck].count += 1;
+    if (!cMap[r.clerk]) cMap[r.clerk]={clerk:r.clerk,issued:0,recovered:0,count:0};
+    cMap[r.clerk].issued    += r.totalIssued;
+    cMap[r.clerk].recovered += r.totalRecovered;
+    cMap[r.clerk].count++;
   });
+
   return {
     rows,
-    monthly:  Object.values(monthlyMap).filter(m => m.issued > 0 || m.recovered > 0),
-    clerks:   Object.values(clerkMap).sort((a, b) => b.issued - a.issued),
-    frequent: Object.entries(farmerCount).filter(([,c]) => c > 1)
-      .sort((a,b) => b[1]-a[1]).slice(0,10).map(([name,count]) => ({name,count})),
+    monthly:  Object.values(mMap).filter(m=>m.issued>0||m.recovered>0),
+    clerks:   Object.values(cMap).sort((a,b)=>b.issued-a.issued),
+    frequent: Object.entries(fMap).filter(([,c])=>c>1)
+      .sort((a,b)=>b[1]-a[1]).slice(0,10).map(([name,count])=>({name,count})),
   };
 }
 
+// ─── Load all tabs in parallel ────────────────────────────────────────────────
 export async function loadAllTabs(tabs) {
   const results = {};
   await Promise.all(tabs.map(async tab => {
-    const raw  = await fetchTab(tab.name);
+    const raw  = await fetchTab(tab);
     const rows = parseRows(raw, tab.layout, tab.year);
     results[tab.name] = buildSummary(rows);
   }));
